@@ -1,0 +1,5 @@
+python-dotenv==1.0.1
+langchain-core==0.3.29
+langchain-google-genai==2.0.9
+reportlab==4.2.5
+Pillow==10.4.0

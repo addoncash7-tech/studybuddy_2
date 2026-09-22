@@ -1,0 +1,15 @@
+# Secrets - never commit these
+.env
+
+# Runtime-generated data (per-user chat history)
+history/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/editor cruft
+.DS_Store
+.vscode/

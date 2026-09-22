@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Study Buddy Chat</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- ===== Screen 0: login ===== -->
+  <div id="login-screen" class="screen">
+    <div class="card">
+      <h1>📚 Study Buddy</h1>
+      <p class="subtitle">Sign in to continue</p>
+
+      <label for="login-username">Username</label>
+      <input type="text" id="login-username" placeholder="Your username" autocomplete="username">
+
+      <label for="login-password">Password</label>
+      <input type="password" id="login-password" placeholder="Your password" autocomplete="current-password">
+
+      <button id="login-btn">Sign In</button>
+      <p id="login-error" class="error"></p>
+    </div>
+  </div>
+
+  <!-- ===== Screen: admin panel ===== -->
+  <div id="admin-screen" class="screen hidden">
+    <div class="card admin-card">
+      <div class="admin-header">
+        <div>
+          <h1>Admin Panel</h1>
+          <p class="subtitle">Manage who can access Study Buddy</p>
+        </div>
+        <div class="header-actions">
+          <button id="admin-to-app-btn" class="secondary-btn">Go to App</button>
+          <button id="admin-logout-btn" class="secondary-btn">Logout</button>
+        </div>
+      </div>
+
+      <h2 class="section-title">Add User</h2>
+      <label for="new-username">Username</label>
+      <input type="text" id="new-username" placeholder="New username">
+
+      <label for="new-password">Password</label>
+      <input type="password" id="new-password" placeholder="New password">
+
+      <button id="add-user-btn">Add User</button>
+      <p id="admin-error" class="error"></p>
+      <p id="admin-success" class="success"></p>
+
+      <h2 class="section-title">Approved Users</h2>
+      <ul id="user-list" class="user-list"></ul>
+    </div>
+  </div>
+
+  <!-- ===== Screen 1: setup form ===== -->
+  <div id="setup-screen" class="screen hidden">
+    <div class="card">
+      <div class="app-header">
+        <div>
+          <h1>📚 Study Buddy</h1>
+          <p class="subtitle">Tell me a bit about what you're studying</p>
+          <p id="welcome-user" class="welcome-user"></p>
+        </div>
+        <div class="header-actions">
+          <button id="admin-panel-btn" class="secondary-btn hidden">Admin</button>
+          <button id="logout-btn" class="secondary-btn">Logout</button>
+        </div>
+      </div>
+
+      <label for="board">Board</label>
+      <input type="text" id="board" placeholder="e.g. CBSE, ICSE, State Board">
+
+      <label for="class_1">Class</label>
+      <input type="text" id="class_1" placeholder="e.g. 8">
+
+      <label for="subject">Subject</label>
+      <input type="text" id="subject" placeholder="e.g. Science">
+
+      <button id="start-btn">Start New Chat</button>
+      <p id="setup-error" class="error"></p>
+
+      <div class="section-row">
+        <h2 class="section-title">Your chat history</h2>
+        <button id="download-all-btn" class="secondary-btn download-all-btn" title="Download all your chats as one PDF">⬇ Download all (PDF)</button>
+      </div>
+      <p class="history-hint">Each new session is saved to your account. Open one anytime to review or continue it.</p>
+      <ul id="history-list" class="history-list"></ul>
+    </div>
+  </div>
+
+  <!-- ===== Screen 2: chat ===== -->
+  <div id="chat-screen" class="screen hidden">
+    <div class="chat-header">
+      <div>
+        <strong id="chat-title">Study Buddy</strong>
+        <div id="chat-subtitle" class="chat-subtitle"></div>
+      </div>
+      <div class="header-actions">
+        <button id="download-chat-btn" class="download-all-btn" title="Download all your chats as one PDF">⬇ PDF</button>
+        <button id="history-btn">History</button>
+        <button id="reset-btn">New Chat</button>
+      </div>
+    </div>
+
+    <div id="messages" class="messages"></div>
+
+    <div class="input-bar">
+      <input type="file" id="image-input" accept="image/jpeg,image/png,image/webp,image/gif" hidden>
+      <button type="button" id="image-btn" title="Upload an image">📷</button>
+      <div class="composer">
+        <div id="image-preview" class="image-preview hidden">
+          <img id="preview-thumb" alt="Selected image">
+          <span id="preview-name"></span>
+          <button type="button" id="clear-image-btn" title="Remove image">×</button>
+        </div>
+        <input type="text" id="question-input" placeholder="Ask a question or upload an image...">
+      </div>
+      <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
