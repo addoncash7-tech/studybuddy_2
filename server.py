@@ -21,7 +21,7 @@ import uuid
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
@@ -45,6 +45,17 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 
+# Default per-user token allowance. Admin can reset a user's usage back to 0
+# from the Admin Panel once they've used up this allowance.
+DEFAULT_TOKEN_LIMIT = 1_000_000
+
+STATUS_PENDING = "pending"
+STATUS_APPROVED = "approved"
+
+MODE_CONCEPT = "concept"
+MODE_EXAM = "exam"
+VALID_MODES = {MODE_CONCEPT, MODE_EXAM}
+
 if not API_KEY:
     raise RuntimeError(
         "GEMINI_API_KEY not found.\n"
@@ -58,7 +69,8 @@ llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", google_api_key=API_KEY)
 ALLOWED_IMAGE_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 
-PROMPT_TEMPLATE = PromptTemplate.from_template(
+# Shared instructions that apply no matter which mode the student picked.
+BASE_PROMPT_TEMPLATE = PromptTemplate.from_template(
     "You are an expert for {board} class {class_1} {subject} and you have the "
     "capability to explain concepts in an easy and concise way, simple, student-friendly language "
     "in simple English with a fun example."
@@ -67,16 +79,43 @@ PROMPT_TEMPLATE = PromptTemplate.from_template(
     "The student may upload an image (homework, textbook page, diagram, worksheet, or handwritten notes). "
     "Read the image carefully and answer based on what is in the image plus the student's question, "
     "using the same teaching approach as text questions."
-    
-    "📚 Helps with homework and exam preparation without simply giving answers"
-    "🧠 Uses step-by-step explanations"
-    "❓ Asks guiding questions when appropriate"
-    "📝 Creates quizzes, flashcards, and practice questions"
-    "🎯 Adapts difficulty to the student's level"
-    "🔄 Corrects mistakes and explains why an answer is wrong"
     "🚫 Avoids inappropriate or unsafe content"
     "💡 Encourages curiosity and independent thinking"
+    "⚠️ Never use LaTeX syntax or math delimiters ($, $$, \\(, \\), \\[, \\], \\text{{}}, \\frac{{}}, etc.) "
+    "because this chat cannot render them. Write chemical equations, formulas, and math directly as "
+    "plain text using Unicode characters instead, e.g. 'CuO(s) + H₂(g) → Cu(s) + H₂O(l)', 'x²', 'H₂SO₄'."
 )
+
+# Branch-specific instructions, appended on top of the base prompt depending
+# on whether the student chose "Concept Understanding" or "Exam Preparation".
+CONCEPT_PROMPT_ADDITION = (
+    " Right now the student is in CONCEPT UNDERSTANDING mode, so your goal is to build a deep, "
+    "intuitive understanding of the topic rather than to drill for exams."
+    "🧠 Break the concept down step-by-step from first principles"
+    "❓ Ask guiding questions before revealing the full explanation"
+    "🎯 Use everyday analogies and fun, relatable examples"
+    "🔄 Check understanding by asking the student to explain it back or try a mini example"
+    "📚 Connect the concept to the bigger picture of the chapter/subject"
+    "💬 Prefer clarity and intuition over memorized definitions"
+)
+
+EXAM_PROMPT_ADDITION = (
+    " Right now the student is in EXAM PREPARATION mode, so your goal is to help them perform well "
+    "in tests and exams for this board, class, and subject."
+    "📝 Create practice questions, quizzes, and flashcards in the style typically asked in exams"
+    "🎯 Point out frequently asked questions, important topics, and marks-weightage where relevant"
+    "🧭 Teach exam-answer structure: what to write for full marks, keywords examiners look for, and time management tips"
+    "🔄 Correct mistakes precisely and explain why an answer would lose marks"
+    "📋 Offer short revision notes/summaries and memory tricks (mnemonics) when useful"
+    "⏱️ Keep answers exam-focused: without simply giving away full answers, help the student reach the exam-ready answer"
+)
+
+
+def build_system_prompt(board, class_1, subject, mode):
+    """Build the system prompt text for a chat, branching on the chosen mode."""
+    base = str(BASE_PROMPT_TEMPLATE.invoke({"board": board, "class_1": class_1, "subject": subject}))
+    addition = EXAM_PROMPT_ADDITION if mode == MODE_EXAM else CONCEPT_PROMPT_ADDITION
+    return base + addition
 
 # Per-user conversation state keyed by username.
 conversations = {}
@@ -89,13 +128,22 @@ def hash_password(password):
     return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
 
+def _normalize_user(user):
+    """Fill in defaults for fields that may be missing from older users.json entries."""
+    user.setdefault("status", STATUS_APPROVED)
+    user.setdefault("token_limit", DEFAULT_TOKEN_LIMIT)
+    user.setdefault("tokens_used", 0)
+    user.setdefault("created_at", now_iso())
+    return user
+
+
 def load_users():
     if not USERS_FILE.exists():
         save_users([])
         return []
     with open(USERS_FILE, encoding="utf-8") as f:
         data = json.load(f)
-    return data.get("users", [])
+    return [_normalize_user(u) for u in data.get("users", [])]
 
 
 def save_users(users):
@@ -111,21 +159,89 @@ def find_user(username):
     return None
 
 
+def update_user(username, **fields):
+    """Update one user's record in users.json and return the updated record, or None."""
+    username = (username or "").strip().lower()
+    users = load_users()
+    updated = None
+    for user in users:
+        if user["username"].lower() == username:
+            user.update(fields)
+            updated = user
+            break
+    if updated is not None:
+        save_users(users)
+    return updated
+
+
+def create_pending_user(username, password):
+    users = load_users()
+    users.append({
+        "username": username,
+        "password_hash": hash_password(password),
+        "status": STATUS_PENDING,
+        "token_limit": DEFAULT_TOKEN_LIMIT,
+        "tokens_used": 0,
+        "created_at": now_iso(),
+    })
+    save_users(users)
+
+
+def approve_user(username):
+    return update_user(username, status=STATUS_APPROVED)
+
+
+def reset_user_tokens(username):
+    return update_user(username, tokens_used=0)
+
+
+def add_user_tokens(username, amount):
+    if amount <= 0:
+        return
+    user = find_user(username)
+    if not user:
+        return
+    update_user(username, tokens_used=user.get("tokens_used", 0) + amount)
+
+
+def usage_payload(username, role):
+    """Return {tokens_used, token_limit, tokens_remaining, percent_used, percent_remaining}
+    for a regular user, or None for admin (admin has no token limit)."""
+    if role == "admin":
+        return None
+    user = find_user(username)
+    if not user:
+        return None
+    limit = max(1, user.get("token_limit", DEFAULT_TOKEN_LIMIT))
+    used = min(user.get("tokens_used", 0), limit)
+    percent_used = round((used / limit) * 100, 1)
+    return {
+        "tokens_used": used,
+        "token_limit": limit,
+        "tokens_remaining": limit - used,
+        "percent_used": percent_used,
+        "percent_remaining": round(100 - percent_used, 1),
+    }
+
+
 def authenticate(username, password):
     username = (username or "").strip()
     password = password or ""
 
     if not username or not password:
-        return None
+        return None, None
 
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
-        return {"username": username, "role": "admin"}
+        return {"username": username, "role": "admin"}, None
 
     user = find_user(username)
-    if user and user["password_hash"] == hash_password(password):
-        return {"username": user["username"], "role": "user"}
+    if not user or user["password_hash"] != hash_password(password):
+        return None, None
 
-    return None
+    if user.get("status") != STATUS_APPROVED:
+        return None, "Your account is awaiting admin approval. Please check back later."
+
+    return {"username": user["username"], "role": "user"}, None
 
 
 def create_session(user):
@@ -216,6 +332,7 @@ def chat_summary(chat):
         "board": chat.get("board", ""),
         "class_1": chat.get("class_1", ""),
         "subject": chat.get("subject", ""),
+        "mode": chat.get("mode") or MODE_CONCEPT,
         "created_at": chat.get("created_at", ""),
         "updated_at": chat.get("updated_at", ""),
         "preview": chat.get("preview") or "New chat",
@@ -254,6 +371,7 @@ def persist_active_chat(username, conversation):
         "board": conversation.get("board", ""),
         "class_1": conversation.get("class_1", ""),
         "subject": conversation.get("subject", ""),
+        "mode": conversation.get("mode") or MODE_CONCEPT,
         "created_at": conversation.get("created_at") or now_iso(),
         "updated_at": now_iso(),
         "preview": preview,
@@ -264,12 +382,13 @@ def persist_active_chat(username, conversation):
 
 
 def build_langchain_messages(chat):
-    prompt_value = PROMPT_TEMPLATE.invoke({
-        "board": chat.get("board") or "",
-        "class_1": chat.get("class_1") or "",
-        "subject": chat.get("subject") or "",
-    })
-    messages = [SystemMessage(content=str(prompt_value))]
+    system_text = build_system_prompt(
+        chat.get("board") or "",
+        chat.get("class_1") or "",
+        chat.get("subject") or "",
+        chat.get("mode") or MODE_CONCEPT,
+    )
+    messages = [SystemMessage(content=system_text)]
     for item in chat.get("messages") or []:
         role = item.get("role")
         text = (item.get("text") or "").strip()
@@ -366,14 +485,24 @@ class Handler(BaseHTTPRequestHandler):
             if not session:
                 self._respond_json(401, {"error": "Not logged in."})
                 return
-            self._respond_json(200, {"username": session["username"], "role": session["role"]})
+            self._respond_json(200, {
+                "username": session["username"],
+                "role": session["role"],
+                "usage": usage_payload(session["username"], session["role"]),
+            })
             return
 
         if path == "/admin/users":
             session = self._require_auth(admin_only=True)
             if not session:
                 return
-            users = [{"username": u["username"]} for u in load_users()]
+            users = [{
+                "username": u["username"],
+                "status": u.get("status", STATUS_APPROVED),
+                "token_limit": u.get("token_limit", DEFAULT_TOKEN_LIMIT),
+                "tokens_used": u.get("tokens_used", 0),
+                "created_at": u.get("created_at", ""),
+            } for u in load_users()]
             self._respond_json(200, {"users": users})
             return
 
@@ -382,7 +511,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/chats/export":
-            self._handle_export_chats()
+            query = parse_qs(urlparse(self.path).query)
+            chat_id = (query.get("id") or [None])[0]
+            self._handle_export_chats(chat_id)
             return
 
         self._serve_static(path)
@@ -396,6 +527,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/login":
             self._handle_login(data)
+        elif path == "/signup":
+            self._handle_signup(data)
         elif path == "/logout":
             self._handle_logout()
         elif path == "/init":
@@ -406,6 +539,10 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_resume_chat(data)
         elif path == "/admin/users":
             self._handle_add_user(data)
+        elif path == "/admin/users/approve":
+            self._handle_approve_user(data)
+        elif path == "/admin/users/reset-tokens":
+            self._handle_reset_tokens(data)
         else:
             self._respond_json(404, {"error": "Unknown endpoint."})
 
@@ -449,9 +586,9 @@ class Handler(BaseHTTPRequestHandler):
         self._respond_json(200, {"status": "ok"})
 
     def _handle_login(self, data):
-        user = authenticate(data.get("username"), data.get("password"))
+        user, error = authenticate(data.get("username"), data.get("password"))
         if not user:
-            self._respond_json(401, {"error": "Invalid username or password, or access not granted."})
+            self._respond_json(401, {"error": error or "Invalid username or password, or access not granted."})
             return
 
         token = create_session(user)
@@ -459,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
             "token": token,
             "username": user["username"],
             "role": user["role"],
+            "usage": usage_payload(user["username"], user["role"]),
         })
 
     def _handle_logout(self):
@@ -488,9 +626,76 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         users = load_users()
-        users.append({"username": username, "password_hash": hash_password(password)})
+        users.append({
+            "username": username,
+            "password_hash": hash_password(password),
+            "status": STATUS_APPROVED,
+            "token_limit": DEFAULT_TOKEN_LIMIT,
+            "tokens_used": 0,
+            "created_at": now_iso(),
+        })
         save_users(users)
         self._respond_json(200, {"status": "ok", "username": username})
+
+    def _handle_signup(self, data):
+        username = (data.get("username") or "").strip()
+        password = (data.get("password") or "").strip()
+
+        if not username or not password:
+            self._respond_json(400, {"error": "Username and password are required."})
+            return
+
+        if len(password) < 4:
+            self._respond_json(400, {"error": "Password must be at least 4 characters."})
+            return
+
+        if username.lower() == ADMIN_USERNAME.lower():
+            self._respond_json(400, {"error": "That username is not available."})
+            return
+
+        if find_user(username):
+            self._respond_json(409, {"error": "That username is already taken or awaiting approval."})
+            return
+
+        create_pending_user(username, password)
+        self._respond_json(200, {
+            "status": "pending",
+            "message": "Your sign-up request has been sent to the admin for approval. You'll be able to log in once approved.",
+        })
+
+    def _handle_approve_user(self, data):
+        session = self._require_auth(admin_only=True)
+        if not session:
+            return
+
+        username = (data.get("username") or "").strip()
+        if not username:
+            self._respond_json(400, {"error": "Username is required."})
+            return
+
+        user = approve_user(username)
+        if not user:
+            self._respond_json(404, {"error": "User not found."})
+            return
+
+        self._respond_json(200, {"status": "ok", "username": user["username"]})
+
+    def _handle_reset_tokens(self, data):
+        session = self._require_auth(admin_only=True)
+        if not session:
+            return
+
+        username = (data.get("username") or "").strip()
+        if not username:
+            self._respond_json(400, {"error": "Username is required."})
+            return
+
+        user = reset_user_tokens(username)
+        if not user:
+            self._respond_json(404, {"error": "User not found."})
+            return
+
+        self._respond_json(200, {"status": "ok", "username": user["username"], "tokens_used": user["tokens_used"]})
 
     def _handle_init(self, data):
         session = self._require_auth()
@@ -500,15 +705,17 @@ class Handler(BaseHTTPRequestHandler):
         board = (data.get("board") or "").strip()
         class_1 = (data.get("class_1") or "").strip()
         subject = (data.get("subject") or "").strip()
+        mode = (data.get("mode") or "").strip().lower()
 
         if not (board and class_1 and subject):
             self._respond_json(400, {"error": "board, class_1 and subject are all required."})
             return
 
-        prompt_value = PROMPT_TEMPLATE.invoke(
-            {"board": board, "class_1": class_1, "subject": subject}
-        )
-        sys_msg = SystemMessage(content=str(prompt_value))
+        if mode not in VALID_MODES:
+            self._respond_json(400, {"error": "Please choose whether you want Exam Preparation or Concept Understanding."})
+            return
+
+        sys_msg = SystemMessage(content=build_system_prompt(board, class_1, subject, mode))
         created = now_iso()
 
         username = session["username"]
@@ -517,6 +724,7 @@ class Handler(BaseHTTPRequestHandler):
             "board": board,
             "class_1": class_1,
             "subject": subject,
+            "mode": mode,
             "created_at": created,
             "messages": [sys_msg],
             "transcript": [],
@@ -529,7 +737,9 @@ class Handler(BaseHTTPRequestHandler):
             "board": board,
             "class_1": class_1,
             "subject": subject,
+            "mode": mode,
             "created_at": created,
+            "usage": usage_payload(username, session["role"]),
         })
 
     def _handle_chat(self, data):
@@ -542,6 +752,19 @@ class Handler(BaseHTTPRequestHandler):
         if not conversation or not conversation.get("messages"):
             self._respond_json(400, {"error": "Session not initialized. Call /init first."})
             return
+
+        if session["role"] != "admin":
+            user = find_user(username)
+            if user and user.get("tokens_used", 0) >= user.get("token_limit", DEFAULT_TOKEN_LIMIT):
+                self._respond_json(402, {
+                    "error": "PAYMENT_REQUIRED",
+                    "message": (
+                        "You've used up your free token allowance for Study Buddy. "
+                        "Please contact the admin to top up your access or arrange additional payment."
+                    ),
+                    "usage": usage_payload(username, session["role"]),
+                })
+                return
 
         question = (data.get("question") or "").strip()
         image = data.get("image") or {}
@@ -590,7 +813,29 @@ class Handler(BaseHTTPRequestHandler):
         })
         persist_active_chat(username, conversation)
 
-        self._respond_json(200, {"answer": answer_text})
+        if session["role"] != "admin":
+            add_user_tokens(username, self._extract_token_count(ai_message, question, answer_text))
+
+        self._respond_json(200, {
+            "answer": answer_text,
+            "usage": usage_payload(username, session["role"]),
+        })
+
+    def _extract_token_count(self, ai_message, question, answer_text):
+        """Prefer the real usage reported by Gemini; fall back to a rough estimate."""
+        usage = getattr(ai_message, "usage_metadata", None)
+        if isinstance(usage, dict) and usage.get("total_tokens"):
+            return int(usage["total_tokens"])
+
+        response_metadata = getattr(ai_message, "response_metadata", None) or {}
+        usage_meta = response_metadata.get("usage_metadata") if isinstance(response_metadata, dict) else None
+        if isinstance(usage_meta, dict):
+            total = usage_meta.get("total_token_count") or usage_meta.get("total_tokens")
+            if total:
+                return int(total)
+
+        # Rough fallback estimate: ~4 characters per token.
+        return max(1, (len(question or "") + len(answer_text or "")) // 4)
 
     def _handle_list_chats(self):
         session = self._require_auth()
@@ -601,13 +846,12 @@ class Handler(BaseHTTPRequestHandler):
         chats.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
         self._respond_json(200, {"chats": chats})
 
-    def _handle_export_chats(self):
+    def _handle_export_chats(self, chat_id=None):
         session = self._require_auth()
         if not session:
             return
 
         if build_chats_pdf is None:
-            
             self._respond_json(500, {
                 "error": "PDF export is not set up on the server. Run: pip install reportlab"
             })
@@ -615,19 +859,30 @@ class Handler(BaseHTTPRequestHandler):
 
         username = session["username"]
         chats = [c for c in load_user_chats(username) if c.get("messages")]
-        if not chats:
+
+        if chat_id:
+            # Download-this-chat button: only export the one chat the user is viewing.
+            chats = [c for c in chats if c.get("id") == chat_id]
+            if not chats:
+                self._respond_json(404, {"error": "Chat not found."})
+                return
+        elif not chats:
             self._respond_json(404, {"error": "No saved chats to download yet."})
             return
+
         chats.sort(key=lambda c: c.get("created_at") or "")
 
         try:
-            print("----------------------------------")
             pdf_bytes = build_chats_pdf(username, chats)
         except Exception as exc:
             self._respond_json(500, {"error": f"Could not create the PDF: {exc}"})
             return
 
-        filename = f"study-buddy-chats-{safe_username(username)}-{datetime.now().strftime('%Y-%m-%d')}.pdf"
+        if chat_id:
+            subject = safe_username(chats[0].get("subject") or "chat")
+            filename = f"study-buddy-{subject}-{datetime.now().strftime('%Y-%m-%d')}.pdf"
+        else:
+            filename = f"study-buddy-chats-{safe_username(username)}-{datetime.now().strftime('%Y-%m-%d')}.pdf"
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
         self.send_header("Content-Length", str(len(pdf_bytes)))
@@ -657,6 +912,7 @@ class Handler(BaseHTTPRequestHandler):
             "board": chat.get("board", ""),
             "class_1": chat.get("class_1", ""),
             "subject": chat.get("subject", ""),
+            "mode": chat.get("mode") or MODE_CONCEPT,
             "created_at": chat.get("created_at") or now_iso(),
             "messages": build_langchain_messages(chat),
             "transcript": list(chat.get("messages") or []),

@@ -236,6 +236,96 @@ button {
   border-radius: 10px;
   margin-bottom: 8px;
   font-size: 14px;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.user-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.user-item-name {
+  font-weight: 600;
+  color: #2b2f66;
+}
+
+.user-item-tokens {
+  font-size: 12px;
+  color: #777;
+}
+
+.user-item-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* ---- mode selector ---- */
+.mode-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+.mode-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid #d5d9ea;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: normal;
+  margin: 0;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.mode-option:has(input:checked) {
+  border-color: #6c7ae0;
+  background: #f2f3fd;
+}
+
+.mode-option input[type="radio"] {
+  margin-top: 3px;
+  flex-shrink: 0;
+}
+
+.mode-option span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mode-option strong {
+  font-size: 14px;
+  color: #2b2f66;
+}
+
+.mode-option small {
+  font-size: 12px;
+  color: #777;
+}
+
+/* ---- login / signup switch link ---- */
+.switch-link {
+  margin: 16px 0 0;
+  font-size: 13px;
+  color: #666;
+  text-align: center;
+}
+
+.switch-link a {
+  color: #6c7ae0;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.switch-link a:hover {
+  text-decoration: underline;
 }
 
 .empty-item {
@@ -249,6 +339,47 @@ button {
   color: #4a5199;
   font-size: 13px;
   font-weight: 600;
+}
+
+/* ---- token usage bar ---- */
+.usage-bar {
+  margin-top: 10px;
+}
+
+.usage-bar-track {
+  width: 100%;
+  height: 8px;
+  background: #eef0fb;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: #6c7ae0;
+  border-radius: 6px;
+  transition: width 0.3s ease, background 0.3s ease;
+}
+
+.usage-bar-fill.usage-warn {
+  background: #e0a83c;
+}
+
+.usage-bar-fill.usage-critical {
+  background: #d64545;
+}
+
+.usage-bar-text {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: #777;
+}
+
+.usage-bar-chat {
+  padding: 8px 20px 0;
+  background: #fff;
 }
 
 .history-hint {
@@ -344,7 +475,8 @@ button {
   background: #5a68d1;
 }
 
-#login-btn {
+#login-btn,
+#signup-btn {
   margin-top: 22px;
   width: 100%;
   padding: 12px;
@@ -352,7 +484,8 @@ button {
   color: #fff;
 }
 
-#login-btn:hover {
+#login-btn:hover,
+#signup-btn:hover {
   background: #5a68d1;
 }
 
@@ -587,6 +720,7 @@ button {
 #send-btn:disabled,
 #start-btn:disabled,
 #login-btn:disabled,
+#signup-btn:disabled,
 #add-user-btn:disabled,
 #image-btn:disabled,
 .download-all-btn:disabled {

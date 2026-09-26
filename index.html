@@ -22,6 +22,31 @@
 
       <button id="login-btn">Sign In</button>
       <p id="login-error" class="error"></p>
+
+      <p class="switch-link">New here? <a href="#" id="show-signup-link">Create an account</a></p>
+    </div>
+  </div>
+
+  <!-- ===== Screen: sign up ===== -->
+  <div id="signup-screen" class="screen hidden">
+    <div class="card">
+      <h1>📚 Study Buddy</h1>
+      <p class="subtitle">Request access — an admin will approve your account before you can log in</p>
+
+      <label for="signup-username">Username</label>
+      <input type="text" id="signup-username" placeholder="Choose a username" autocomplete="username">
+
+      <label for="signup-password">Password</label>
+      <input type="password" id="signup-password" placeholder="Choose a password" autocomplete="new-password">
+
+      <label for="signup-password-confirm">Confirm Password</label>
+      <input type="password" id="signup-password-confirm" placeholder="Re-enter your password" autocomplete="new-password">
+
+      <button id="signup-btn">Request Access</button>
+      <p id="signup-error" class="error"></p>
+      <p id="signup-success" class="success"></p>
+
+      <p class="switch-link">Already approved? <a href="#" id="show-login-link">Sign in</a></p>
     </div>
   </div>
 
@@ -50,6 +75,9 @@
       <p id="admin-error" class="error"></p>
       <p id="admin-success" class="success"></p>
 
+      <h2 class="section-title">Pending Sign-up Requests</h2>
+      <ul id="pending-list" class="user-list"></ul>
+
       <h2 class="section-title">Approved Users</h2>
       <ul id="user-list" class="user-list"></ul>
     </div>
@@ -63,6 +91,10 @@
           <h1>📚 Study Buddy</h1>
           <p class="subtitle">Tell me a bit about what you're studying</p>
           <p id="welcome-user" class="welcome-user"></p>
+          <div id="usage-bar-setup" class="usage-bar hidden">
+            <div class="usage-bar-track"><div id="usage-bar-fill-setup" class="usage-bar-fill"></div></div>
+            <span id="usage-bar-text-setup" class="usage-bar-text"></span>
+          </div>
         </div>
         <div class="header-actions">
           <button id="admin-panel-btn" class="secondary-btn hidden">Admin</button>
@@ -78,6 +110,24 @@
 
       <label for="subject">Subject</label>
       <input type="text" id="subject" placeholder="e.g. Science">
+
+      <label>What do you need help with?</label>
+      <div class="mode-group" id="mode-group">
+        <label class="mode-option">
+          <input type="radio" name="mode" value="concept" checked>
+          <span>
+            <strong>🧠 Concept Understanding</strong>
+            <small>Build intuition with step-by-step, easy explanations</small>
+          </span>
+        </label>
+        <label class="mode-option">
+          <input type="radio" name="mode" value="exam">
+          <span>
+            <strong>📝 Exam Preparation</strong>
+            <small>Practice questions, revision notes, and exam-answer tips</small>
+          </span>
+        </label>
+      </div>
 
       <button id="start-btn">Start New Chat</button>
       <p id="setup-error" class="error"></p>
@@ -103,6 +153,10 @@
         <button id="history-btn">History</button>
         <button id="reset-btn">New Chat</button>
       </div>
+    </div>
+    <div id="usage-bar-chat" class="usage-bar usage-bar-chat hidden">
+      <div class="usage-bar-track"><div id="usage-bar-fill-chat" class="usage-bar-fill"></div></div>
+      <span id="usage-bar-text-chat" class="usage-bar-text"></span>
     </div>
 
     <div id="messages" class="messages"></div>

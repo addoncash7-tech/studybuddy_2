@@ -339,9 +339,11 @@ def build_chats_pdf(username, chats):
 
         subject = clean(chat.get("subject") or "Study chat")
         story.append(Paragraph(escape("Chat %d: %s" % (index, subject)), styles["chat_title"]))
+        mode_label = {"exam": "Exam Preparation", "concept": "Concept Understanding"}.get(chat.get("mode"), "")
         meta = [
             clean(chat.get("board") or ""),
             "Class %s" % clean(chat["class_1"]) if chat.get("class_1") else "",
+            mode_label,
             "Started %s" % _format_dt(chat.get("created_at")) if chat.get("created_at") else "",
         ]
         story.append(Paragraph(escape("  |  ".join(m for m in meta if m)), styles["chat_meta"]))
