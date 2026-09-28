@@ -205,8 +205,12 @@ def add_user_tokens(username, amount):
 
 
 def usage_payload(username, role):
-    """Return {tokens_used, token_limit, tokens_remaining, percent_used, percent_remaining}
-    for a regular user, or None for admin (admin has no token limit)."""
+    """Usage info sent to the browser: PERCENTAGES ONLY.
+
+    Raw tokens_used / token_limit are still tracked in users.json (and visible to
+    the admin via /admin/users) but are never sent to regular users.
+    Returns None for admin (no limit).
+    """
     if role == "admin":
         return None
     user = find_user(username)
@@ -216,9 +220,6 @@ def usage_payload(username, role):
     used = min(user.get("tokens_used", 0), limit)
     percent_used = round((used / limit) * 100, 1)
     return {
-        "tokens_used": used,
-        "token_limit": limit,
-        "tokens_remaining": limit - used,
         "percent_used": percent_used,
         "percent_remaining": round(100 - percent_used, 1),
     }
@@ -376,35 +377,130 @@ def persist_active_chat(username, conversation):
         "updated_at": now_iso(),
         "preview": preview,
         "messages": conversation.get("transcript") or [],
+        "summary": conversation.get("summary", ""),
+        "summarized_count": conversation.get("summarized_count", 0),
     }
     conversation["created_at"] = chat["created_at"]
     upsert_saved_chat(username, chat)
 
 
-def build_langchain_messages(chat):
+def message_text(ai_message):
+    """Extract plain text from a LangChain AI message (str or list-of-parts content)."""
+    if isinstance(ai_message, str):
+        return ai_message
+    content = getattr(ai_message, "content", None)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("text"):
+                parts.append(part["text"])
+        return "\n".join(p for p in parts if p).strip() or str(ai_message)
+    return str(ai_message)
+
+
+def extract_token_count(ai_message, question="", answer_text=""):
+    """Prefer the real usage reported by Gemini; fall back to a rough estimate."""
+    usage = getattr(ai_message, "usage_metadata", None)
+    if isinstance(usage, dict) and usage.get("total_tokens"):
+        return int(usage["total_tokens"])
+
+    response_metadata = getattr(ai_message, "response_metadata", None) or {}
+    usage_meta = response_metadata.get("usage_metadata") if isinstance(response_metadata, dict) else None
+    if isinstance(usage_meta, dict):
+        total = usage_meta.get("total_token_count") or usage_meta.get("total_tokens")
+        if total:
+            return int(total)
+
+    # Rough fallback estimate: ~4 characters per token.
+    return max(1, (len(question or "") + len(answer_text or "")) // 4)
+
+
+# ---- Token-saving context: rolling summary + recent messages only ----
+# The full transcript is always saved (UI / PDF show everything), but the model
+# only receives: system prompt + short summary of older turns + last few messages.
+SUMMARY_TRIGGER = 12   # summarise once this many un-summarised messages pile up
+KEEP_RECENT = 6        # always send the last N messages word-for-word
+
+
+def build_context(conv):
+    """Messages to send to the LLM for this conversation."""
     system_text = build_system_prompt(
-        chat.get("board") or "",
-        chat.get("class_1") or "",
-        chat.get("subject") or "",
-        chat.get("mode") or MODE_CONCEPT,
+        conv.get("board") or "",
+        conv.get("class_1") or "",
+        conv.get("subject") or "",
+        conv.get("mode") or MODE_CONCEPT,
     )
+    if conv.get("summary"):
+        system_text += (
+            "\n\nSummary of the earlier part of this conversation "
+            "(for context only, do not repeat it):\n" + conv["summary"]
+        )
     messages = [SystemMessage(content=system_text)]
-    for item in chat.get("messages") or []:
+
+    transcript = conv.get("transcript") or []
+    start_at = conv.get("summarized_count", 0)
+    last_index = len(transcript) - 1
+    for i in range(start_at, len(transcript)):
+        item = transcript[i]
         role = item.get("role")
         text = (item.get("text") or "").strip()
         image = item.get("image")
         if role == "user":
-            if image:
+            if image and i == last_index:
+                # Only the newest message carries the actual image (images are expensive).
                 content, error = build_image_content(text, image, "")
                 if error:
                     messages.append(HumanMessage(content=text or "Help me with this image."))
                 else:
                     messages.append(HumanMessage(content=content))
-            elif text:
-                messages.append(HumanMessage(content=text))
+            else:
+                if image:
+                    text = (text + " [student uploaded an image earlier]").strip()
+                if text:
+                    messages.append(HumanMessage(content=text))
         elif role == "bot" and text:
             messages.append(AIMessage(content=text))
     return messages
+
+
+def maybe_summarize(conv):
+    """Fold older turns into conv['summary'] when the chat gets long.
+
+    Returns the LLM reply (so its token usage can be charged) or None if no
+    summarising was needed.
+    """
+    transcript = conv.get("transcript") or []
+    done = conv.get("summarized_count", 0)
+    if len(transcript) - done <= SUMMARY_TRIGGER:
+        return None
+
+    end = len(transcript) - KEEP_RECENT
+    lines = []
+    for item in transcript[done:end]:
+        who = "Student" if item.get("role") == "user" else "Tutor"
+        text = (item.get("text") or "").strip()
+        if item.get("image"):
+            text = (text + " [image uploaded]").strip()
+        lines.append(f"{who}: {text}")
+
+    prompt = (
+        "Update the running summary of a school tutoring chat. Keep it under 200 words. "
+        "Include: topics covered, key explanations already given, the student's mistakes or "
+        "weak areas, and anything still unresolved. Plain text only, no LaTeX.\n\n"
+        f"Previous summary:\n{conv.get('summary') or '(none)'}\n\n"
+        "New messages to fold in:\n" + "\n".join(lines)
+    )
+    reply = llm.invoke([HumanMessage(content=prompt)])
+    summary = message_text(reply).strip()
+    if not summary:
+        return reply
+    conv["summary"] = summary
+    conv["summarized_count"] = end
+    return reply
 
 
 def build_image_content(question, image_data, image_type):
@@ -715,7 +811,6 @@ class Handler(BaseHTTPRequestHandler):
             self._respond_json(400, {"error": "Please choose whether you want Exam Preparation or Concept Understanding."})
             return
 
-        sys_msg = SystemMessage(content=build_system_prompt(board, class_1, subject, mode))
         created = now_iso()
 
         username = session["username"]
@@ -726,7 +821,8 @@ class Handler(BaseHTTPRequestHandler):
             "subject": subject,
             "mode": mode,
             "created_at": created,
-            "messages": [sys_msg],
+            "summary": "",
+            "summarized_count": 0,
             "transcript": [],
         }
         persist_active_chat(username, conversations[username])
@@ -749,7 +845,7 @@ class Handler(BaseHTTPRequestHandler):
 
         username = session["username"]
         conversation = conversations.get(username)
-        if not conversation or not conversation.get("messages"):
+        if not conversation:
             self._respond_json(400, {"error": "Session not initialized. Call /init first."})
             return
 
@@ -759,7 +855,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._respond_json(402, {
                     "error": "PAYMENT_REQUIRED",
                     "message": (
-                        "You've used up your free token allowance for Study Buddy. "
+                        "You've used up your free usage allowance for Study Buddy. "
                         "Please contact the admin to top up your access or arrange additional payment."
                     ),
                     "usage": usage_payload(username, session["role"]),
@@ -775,37 +871,38 @@ class Handler(BaseHTTPRequestHandler):
             self._respond_json(400, {"error": "Question is empty. Type a question or upload an image."})
             return
 
+        # Compress old turns into a short summary if the chat has grown long.
+        # (Its token cost is charged to the user too.)
+        summary_tokens = 0
+        try:
+            summary_reply = maybe_summarize(conversation)
+            if summary_reply is not None:
+                summary_tokens = extract_token_count(summary_reply, "", conversation.get("summary", ""))
+        except Exception as exc:
+            print("[server] summarisation skipped:", exc)
+
         if image_data:
             human_content, image_error = build_image_content(question, image_data, image_type)
             if image_error:
                 self._respond_json(400, {"error": image_error})
                 return
-            conversation["messages"].append(HumanMessage(content=human_content))
-            user_text = question or "Help me with this image."
-            image_url = human_content[1]["image_url"]["url"]
-            conversation.setdefault("transcript", []).append({
+            entry = {
                 "role": "user",
-                "text": user_text,
-                "image": image_url,
-            })
+                "text": question or "Help me with this image.",
+                "image": human_content[1]["image_url"]["url"],
+            }
         else:
-            conversation["messages"].append(HumanMessage(content=question))
-            conversation.setdefault("transcript", []).append({
-                "role": "user",
-                "text": question,
-                "image": None,
-            })
+            entry = {"role": "user", "text": question, "image": None}
+        conversation.setdefault("transcript", []).append(entry)
 
         try:
-            ai_message = llm.invoke(conversation["messages"])
+            ai_message = llm.invoke(build_context(conversation))
         except Exception as exc:
-            conversation["messages"].pop()
             conversation["transcript"].pop()
             self._respond_json(500, {"error": f"LLM call failed: {exc}"})
             return
 
-        answer_text = self._message_text(ai_message)
-        conversation["messages"].append(AIMessage(content=answer_text))
+        answer_text = message_text(ai_message)
         conversation["transcript"].append({
             "role": "bot",
             "text": answer_text,
@@ -814,28 +911,12 @@ class Handler(BaseHTTPRequestHandler):
         persist_active_chat(username, conversation)
 
         if session["role"] != "admin":
-            add_user_tokens(username, self._extract_token_count(ai_message, question, answer_text))
+            add_user_tokens(username, summary_tokens + extract_token_count(ai_message, question, answer_text))
 
         self._respond_json(200, {
             "answer": answer_text,
             "usage": usage_payload(username, session["role"]),
         })
-
-    def _extract_token_count(self, ai_message, question, answer_text):
-        """Prefer the real usage reported by Gemini; fall back to a rough estimate."""
-        usage = getattr(ai_message, "usage_metadata", None)
-        if isinstance(usage, dict) and usage.get("total_tokens"):
-            return int(usage["total_tokens"])
-
-        response_metadata = getattr(ai_message, "response_metadata", None) or {}
-        usage_meta = response_metadata.get("usage_metadata") if isinstance(response_metadata, dict) else None
-        if isinstance(usage_meta, dict):
-            total = usage_meta.get("total_token_count") or usage_meta.get("total_tokens")
-            if total:
-                return int(total)
-
-        # Rough fallback estimate: ~4 characters per token.
-        return max(1, (len(question or "") + len(answer_text or "")) // 4)
 
     def _handle_list_chats(self):
         session = self._require_auth()
@@ -914,7 +995,8 @@ class Handler(BaseHTTPRequestHandler):
             "subject": chat.get("subject", ""),
             "mode": chat.get("mode") or MODE_CONCEPT,
             "created_at": chat.get("created_at") or now_iso(),
-            "messages": build_langchain_messages(chat),
+            "summary": chat.get("summary", ""),
+            "summarized_count": chat.get("summarized_count", 0),
             "transcript": list(chat.get("messages") or []),
         }
         self._respond_json(200, public_chat(chat))
@@ -944,22 +1026,6 @@ class Handler(BaseHTTPRequestHandler):
             conversations.pop(username, None)
 
         self._respond_json(200, {"status": "ok"})
-
-    def _message_text(self, ai_message):
-        if isinstance(ai_message, str):
-            return ai_message
-        content = getattr(ai_message, "content", None)
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for part in content:
-                if isinstance(part, str):
-                    parts.append(part)
-                elif isinstance(part, dict) and part.get("text"):
-                    parts.append(part["text"])
-            return "\n".join(p for p in parts if p).strip() or str(ai_message)
-        return str(ai_message)
 
     def _serve_static(self, path):
         if path == "/":

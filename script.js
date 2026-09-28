@@ -51,10 +51,6 @@ const usageBarChat = document.getElementById("usage-bar-chat");
 const usageBarFillChat = document.getElementById("usage-bar-fill-chat");
 const usageBarTextChat = document.getElementById("usage-bar-text-chat");
 
-function formatTokenCount(n) {
-  return (n || 0).toLocaleString();
-}
-
 function renderUsage(usage) {
   const bars = [
     { bar: usageBarSetup, fill: usageBarFillSetup, text: usageBarTextSetup },
@@ -68,7 +64,7 @@ function renderUsage(usage) {
   }
 
   const percentUsed = Math.min(100, Math.max(0, usage.percent_used));
-  const label = `${formatTokenCount(usage.tokens_used)} / ${formatTokenCount(usage.token_limit)} tokens used · ${usage.percent_remaining}% remaining`;
+  const label = `${Math.round(usage.percent_remaining)}% of your usage remaining`;
 
   bars.forEach(({ bar, fill, text }) => {
     bar.classList.remove("hidden");
