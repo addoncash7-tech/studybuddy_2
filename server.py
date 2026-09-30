@@ -377,8 +377,6 @@ def persist_active_chat(username, conversation):
         "updated_at": now_iso(),
         "preview": preview,
         "messages": conversation.get("transcript") or [],
-        "summary": conversation.get("summary", ""),
-        "summarized_count": conversation.get("summarized_count", 0),
     }
     conversation["created_at"] = chat["created_at"]
     upsert_saved_chat(username, chat)
@@ -419,30 +417,30 @@ def extract_token_count(ai_message, question="", answer_text=""):
     return max(1, (len(question or "") + len(answer_text or "")) // 4)
 
 
-# ---- Token-saving context: rolling summary + recent messages only ----
+# ---- Token-saving context: system prompt + last N messages only ----
 # The full transcript is always saved (UI / PDF show everything), but the model
-# only receives: system prompt + short summary of older turns + last few messages.
-SUMMARY_TRIGGER = 12   # summarise once this many un-summarised messages pile up
-KEEP_RECENT = 6        # always send the last N messages word-for-word
+# only receives: system prompt + the most recent messages.
+CONTEXT_MESSAGES = 6   # number of latest messages sent to the LLM
 
 
 def build_context(conv):
-    """Messages to send to the LLM for this conversation."""
+    """Messages to send to the LLM: system prompt + latest CONTEXT_MESSAGES messages."""
     system_text = build_system_prompt(
         conv.get("board") or "",
         conv.get("class_1") or "",
         conv.get("subject") or "",
         conv.get("mode") or MODE_CONCEPT,
     )
-    if conv.get("summary"):
-        system_text += (
-            "\n\nSummary of the earlier part of this conversation "
-            "(for context only, do not repeat it):\n" + conv["summary"]
-        )
     messages = [SystemMessage(content=system_text)]
 
     transcript = conv.get("transcript") or []
-    start_at = conv.get("summarized_count", 0)
+    start_at = max(0, len(transcript) - CONTEXT_MESSAGES)
+
+    # The window must begin with a student message (some LLM APIs reject a
+    # conversation that starts with an assistant turn), so skip a leading bot reply.
+    while start_at < len(transcript) and transcript[start_at].get("role") != "user":
+        start_at += 1
+
     last_index = len(transcript) - 1
     for i in range(start_at, len(transcript)):
         item = transcript[i]
@@ -465,42 +463,6 @@ def build_context(conv):
         elif role == "bot" and text:
             messages.append(AIMessage(content=text))
     return messages
-
-
-def maybe_summarize(conv):
-    """Fold older turns into conv['summary'] when the chat gets long.
-
-    Returns the LLM reply (so its token usage can be charged) or None if no
-    summarising was needed.
-    """
-    transcript = conv.get("transcript") or []
-    done = conv.get("summarized_count", 0)
-    if len(transcript) - done <= SUMMARY_TRIGGER:
-        return None
-
-    end = len(transcript) - KEEP_RECENT
-    lines = []
-    for item in transcript[done:end]:
-        who = "Student" if item.get("role") == "user" else "Tutor"
-        text = (item.get("text") or "").strip()
-        if item.get("image"):
-            text = (text + " [image uploaded]").strip()
-        lines.append(f"{who}: {text}")
-
-    prompt = (
-        "Update the running summary of a school tutoring chat. Keep it under 200 words. "
-        "Include: topics covered, key explanations already given, the student's mistakes or "
-        "weak areas, and anything still unresolved. Plain text only, no LaTeX.\n\n"
-        f"Previous summary:\n{conv.get('summary') or '(none)'}\n\n"
-        "New messages to fold in:\n" + "\n".join(lines)
-    )
-    reply = llm.invoke([HumanMessage(content=prompt)])
-    summary = message_text(reply).strip()
-    if not summary:
-        return reply
-    conv["summary"] = summary
-    conv["summarized_count"] = end
-    return reply
 
 
 def build_image_content(question, image_data, image_type):
@@ -821,8 +783,6 @@ class Handler(BaseHTTPRequestHandler):
             "subject": subject,
             "mode": mode,
             "created_at": created,
-            "summary": "",
-            "summarized_count": 0,
             "transcript": [],
         }
         persist_active_chat(username, conversations[username])
@@ -871,16 +831,6 @@ class Handler(BaseHTTPRequestHandler):
             self._respond_json(400, {"error": "Question is empty. Type a question or upload an image."})
             return
 
-        # Compress old turns into a short summary if the chat has grown long.
-        # (Its token cost is charged to the user too.)
-        summary_tokens = 0
-        try:
-            summary_reply = maybe_summarize(conversation)
-            if summary_reply is not None:
-                summary_tokens = extract_token_count(summary_reply, "", conversation.get("summary", ""))
-        except Exception as exc:
-            print("[server] summarisation skipped:", exc)
-
         if image_data:
             human_content, image_error = build_image_content(question, image_data, image_type)
             if image_error:
@@ -911,7 +861,7 @@ class Handler(BaseHTTPRequestHandler):
         persist_active_chat(username, conversation)
 
         if session["role"] != "admin":
-            add_user_tokens(username, summary_tokens + extract_token_count(ai_message, question, answer_text))
+            add_user_tokens(username, extract_token_count(ai_message, question, answer_text))
 
         self._respond_json(200, {
             "answer": answer_text,
@@ -995,8 +945,6 @@ class Handler(BaseHTTPRequestHandler):
             "subject": chat.get("subject", ""),
             "mode": chat.get("mode") or MODE_CONCEPT,
             "created_at": chat.get("created_at") or now_iso(),
-            "summary": chat.get("summary", ""),
-            "summarized_count": chat.get("summarized_count", 0),
             "transcript": list(chat.get("messages") or []),
         }
         self._respond_json(200, public_chat(chat))
