@@ -49,6 +49,16 @@ ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "changeme")
 # from the Admin Panel once they've used up this allowance.
 DEFAULT_TOKEN_LIMIT = 1_000_000
 
+# ---- Payments (manual UPI-QR flow) ----
+# The user scans qr.png, pays PAYMENT_AMOUNT, and submits the UPI transaction ID (UTR).
+# The admin checks the payment in their bank/UPI app and verifies it in the Admin Panel.
+PAYMENT_AMOUNT = int(os.getenv("PAYMENT_AMOUNT", "250"))   # rupees
+CONTACT_PHONE = "+918320260205"
+PAYMENT_PENDING = "submitted"
+PAYMENT_VERIFIED = "verified"
+PAYMENT_REJECTED = "rejected"
+UTR_RE = re.compile(r"^[A-Za-z0-9]{8,30}$")
+
 STATUS_PENDING = "pending"
 STATUS_APPROVED = "approved"
 
@@ -134,6 +144,7 @@ def _normalize_user(user):
     user.setdefault("token_limit", DEFAULT_TOKEN_LIMIT)
     user.setdefault("tokens_used", 0)
     user.setdefault("created_at", now_iso())
+    user.setdefault("payments", [])
     return user
 
 
@@ -174,7 +185,56 @@ def update_user(username, **fields):
     return updated
 
 
-def create_pending_user(username, password):
+def validate_utr(utr):
+    """Return (clean_utr, error). UPI reference IDs are alphanumeric, usually 12 digits."""
+    utr = (utr or "").strip().replace(" ", "")
+    if not UTR_RE.match(utr):
+        return None, "Please enter a valid UPI transaction ID (8-30 letters/numbers, no spaces)."
+    return utr, None
+
+
+def utr_in_use(utr):
+    """True if this transaction ID was already submitted by anyone (stops re-using one payment)."""
+    utr = utr.lower()
+    for user in load_users():
+        for p in user.get("payments", []):
+            if (p.get("utr") or "").lower() == utr and p.get("status") != PAYMENT_REJECTED:
+                return True
+    return False
+
+
+def new_payment(utr, purpose):
+    return {
+        "utr": utr,
+        "amount": PAYMENT_AMOUNT,
+        "purpose": purpose,            # "signup" or "renewal"
+        "status": PAYMENT_PENDING,
+        "submitted_at": now_iso(),
+    }
+
+
+def has_pending_payment(user):
+    return any(p.get("status") == PAYMENT_PENDING for p in user.get("payments", []))
+
+
+def set_payment_status(username, utr, status):
+    """Mark one payment (matched by UTR) as verified/rejected. Returns updated user or None."""
+    user = find_user(username)
+    if not user:
+        return None
+    found = False
+    payments = user.get("payments", [])
+    for p in payments:
+        if (p.get("utr") or "").lower() == utr.lower() and p.get("status") == PAYMENT_PENDING:
+            p["status"] = status
+            p["reviewed_at"] = now_iso()
+            found = True
+    if not found:
+        return None
+    return update_user(username, payments=payments)
+
+
+def create_pending_user(username, password, utr):
     users = load_users()
     users.append({
         "username": username,
@@ -183,12 +243,22 @@ def create_pending_user(username, password):
         "token_limit": DEFAULT_TOKEN_LIMIT,
         "tokens_used": 0,
         "created_at": now_iso(),
+        "payments": [new_payment(utr, "signup")],
     })
     save_users(users)
 
 
 def approve_user(username):
-    return update_user(username, status=STATUS_APPROVED)
+    """Approve a sign-up. Their sign-up payment is marked verified at the same time."""
+    user = find_user(username)
+    if not user:
+        return None
+    payments = user.get("payments", [])
+    for p in payments:
+        if p.get("status") == PAYMENT_PENDING:
+            p["status"] = PAYMENT_VERIFIED
+            p["reviewed_at"] = now_iso()
+    return update_user(username, status=STATUS_APPROVED, payments=payments)
 
 
 def reset_user_tokens(username):
@@ -222,6 +292,9 @@ def usage_payload(username, role):
     return {
         "percent_used": percent_used,
         "percent_remaining": round(100 - percent_used, 1),
+        "limit_reached": user.get("tokens_used", 0) >= limit,
+        "payment_pending": has_pending_payment(user),
+        "payment_amount": PAYMENT_AMOUNT,
     }
 
 
@@ -560,6 +633,7 @@ class Handler(BaseHTTPRequestHandler):
                 "token_limit": u.get("token_limit", DEFAULT_TOKEN_LIMIT),
                 "tokens_used": u.get("tokens_used", 0),
                 "created_at": u.get("created_at", ""),
+                "payments": u.get("payments", []),
             } for u in load_users()]
             self._respond_json(200, {"users": users})
             return
@@ -601,6 +675,12 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_approve_user(data)
         elif path == "/admin/users/reset-tokens":
             self._handle_reset_tokens(data)
+        elif path == "/payment/submit":
+            self._handle_payment_submit(data)
+        elif path == "/admin/payments/verify":
+            self._handle_review_payment(data, approve=True)
+        elif path == "/admin/payments/reject":
+            self._handle_review_payment(data, approve=False)
         else:
             self._respond_json(404, {"error": "Unknown endpoint."})
 
@@ -711,14 +791,26 @@ class Handler(BaseHTTPRequestHandler):
             self._respond_json(400, {"error": "That username is not available."})
             return
 
+        utr, utr_error = validate_utr(data.get("payment_utr"))
+        if utr_error:
+            self._respond_json(400, {"error": f"Pay Rs. {PAYMENT_AMOUNT} using the QR code, then enter the transaction ID. " + utr_error})
+            return
+
         if find_user(username):
             self._respond_json(409, {"error": "That username is already taken or awaiting approval."})
             return
 
-        create_pending_user(username, password)
+        if utr_in_use(utr):
+            self._respond_json(409, {"error": "This transaction ID has already been used. Please check it and try again."})
+            return
+
+        create_pending_user(username, password, utr)
         self._respond_json(200, {
             "status": "pending",
-            "message": "Your sign-up request has been sent to the admin for approval. You'll be able to log in once approved.",
+            "message": (
+                "Thanks! Your request and payment details have been sent to the admin. "
+                "You'll be able to log in once the payment is verified and your account is approved."
+            ),
         })
 
     def _handle_approve_user(self, data):
@@ -754,6 +846,65 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._respond_json(200, {"status": "ok", "username": user["username"], "tokens_used": user["tokens_used"]})
+
+    def _handle_payment_submit(self, data):
+        """Logged-in user submits the UPI transaction ID after paying to renew access."""
+        session = self._require_auth()
+        if not session:
+            return
+        if session["role"] == "admin":
+            self._respond_json(400, {"error": "Admin accounts have no usage limit."})
+            return
+
+        username = session["username"]
+        user = find_user(username)
+        if not user:
+            self._respond_json(404, {"error": "User not found."})
+            return
+
+        if has_pending_payment(user):
+            self._respond_json(409, {"error": "Your previous payment is still waiting for admin verification."})
+            return
+
+        utr, utr_error = validate_utr(data.get("payment_utr"))
+        if utr_error:
+            self._respond_json(400, {"error": utr_error})
+            return
+
+        if utr_in_use(utr):
+            self._respond_json(409, {"error": "This transaction ID has already been used. Please check it and try again."})
+            return
+
+        payments = user.get("payments", [])
+        payments.append(new_payment(utr, "renewal"))
+        update_user(username, payments=payments)
+        self._respond_json(200, {
+            "status": "ok",
+            "message": "Payment details received. Access will be restored as soon as the admin verifies your payment.",
+            "usage": usage_payload(username, session["role"]),
+        })
+
+    def _handle_review_payment(self, data, approve):
+        """Admin verifies (and resets the user's tokens) or rejects a submitted payment."""
+        session = self._require_auth(admin_only=True)
+        if not session:
+            return
+
+        username = (data.get("username") or "").strip()
+        utr = (data.get("utr") or "").strip()
+        if not username or not utr:
+            self._respond_json(400, {"error": "Username and transaction ID are required."})
+            return
+
+        user = set_payment_status(username, utr, PAYMENT_VERIFIED if approve else PAYMENT_REJECTED)
+        if not user:
+            self._respond_json(404, {"error": "No pending payment found for that user and transaction ID."})
+            return
+
+        if approve:
+            # Paid: reopen access with a fresh allowance.
+            update_user(username, tokens_used=0, status=STATUS_APPROVED)
+        self._respond_json(200, {"status": "ok", "username": user["username"]})
 
     def _handle_init(self, data):
         session = self._require_auth()
@@ -812,12 +963,21 @@ class Handler(BaseHTTPRequestHandler):
         if session["role"] != "admin":
             user = find_user(username)
             if user and user.get("tokens_used", 0) >= user.get("token_limit", DEFAULT_TOKEN_LIMIT):
+                pending = has_pending_payment(user)
+                if pending:
+                    message = (
+                        "Your usage limit is reached. Your payment is waiting for admin verification - "
+                        f"you'll get access again once it's verified. Questions? Call {CONTACT_PHONE}."
+                    )
+                else:
+                    message = (
+                        f"You've reached your usage limit. Pay Rs. {PAYMENT_AMOUNT} via the QR code "
+                        "to continue using Study Buddy."
+                    )
                 self._respond_json(402, {
                     "error": "PAYMENT_REQUIRED",
-                    "message": (
-                        "You've used up your free usage allowance for Study Buddy. "
-                        "Please contact the admin to top up your access or arrange additional payment."
-                    ),
+                    "message": message,
+                    "payment_pending": pending,
                     "usage": usage_payload(username, session["role"]),
                 })
                 return

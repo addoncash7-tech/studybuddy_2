@@ -24,6 +24,7 @@
       <p id="login-error" class="error"></p>
 
       <p class="switch-link">New here? <a href="#" id="show-signup-link">Create an account</a></p>
+      <p class="contact-line">📞 Need help? Call / WhatsApp <a href="tel:+918320260205">+91 83202 60205</a></p>
     </div>
   </div>
 
@@ -31,7 +32,7 @@
   <div id="signup-screen" class="screen hidden">
     <div class="card">
       <h1>📚 Study Buddy</h1>
-      <p class="subtitle">Request access — an admin will approve your account before you can log in</p>
+      <p class="subtitle">Pay ₹250 and request access — an admin will verify your payment and approve your account</p>
 
       <label for="signup-username">Username</label>
       <input type="text" id="signup-username" placeholder="Choose a username" autocomplete="username">
@@ -42,11 +43,14 @@
       <label for="signup-password-confirm">Confirm Password</label>
       <input type="password" id="signup-password-confirm" placeholder="Re-enter your password" autocomplete="new-password">
 
-      <button id="signup-btn">Request Access</button>
+      <div id="signup-payment"></div>
+
+      <button id="signup-btn">Pay ₹250 &amp; Request Access</button>
       <p id="signup-error" class="error"></p>
       <p id="signup-success" class="success"></p>
 
       <p class="switch-link">Already approved? <a href="#" id="show-login-link">Sign in</a></p>
+      <p class="contact-line">📞 Need help? Call / WhatsApp <a href="tel:+918320260205">+91 83202 60205</a></p>
     </div>
   </div>
 
@@ -75,6 +79,9 @@
       <p id="admin-error" class="error"></p>
       <p id="admin-success" class="success"></p>
 
+      <h2 class="section-title">Payments to Verify (renewals)</h2>
+      <ul id="payment-list" class="user-list"></ul>
+
       <h2 class="section-title">Pending Sign-up Requests</h2>
       <ul id="pending-list" class="user-list"></ul>
 
@@ -94,6 +101,7 @@
           <div id="usage-bar-setup" class="usage-bar hidden">
             <div class="usage-bar-track"><div id="usage-bar-fill-setup" class="usage-bar-fill"></div></div>
             <span id="usage-bar-text-setup" class="usage-bar-text"></span>
+            <button type="button" class="pay-link hidden" data-pay-open>Pay ₹250 to renew</button>
           </div>
         </div>
         <div class="header-actions">
@@ -138,6 +146,7 @@
       </div>
       <p class="history-hint">Each new session is saved to your account. Open one anytime to review or continue it.</p>
       <ul id="history-list" class="history-list"></ul>
+      <p class="contact-line">📞 Need help? Call / WhatsApp <a href="tel:+918320260205">+91 83202 60205</a></p>
     </div>
   </div>
 
@@ -157,6 +166,7 @@
     <div id="usage-bar-chat" class="usage-bar usage-bar-chat hidden">
       <div class="usage-bar-track"><div id="usage-bar-fill-chat" class="usage-bar-fill"></div></div>
       <span id="usage-bar-text-chat" class="usage-bar-text"></span>
+      <button type="button" class="pay-link hidden" data-pay-open>Pay ₹250 to renew</button>
     </div>
 
     <div id="messages" class="messages"></div>
@@ -173,6 +183,36 @@
         <input type="text" id="question-input" placeholder="Ask a question or upload an image...">
       </div>
       <button id="send-btn">Send</button>
+    </div>
+  </div>
+
+  <!-- ===== Shared payment box (cloned into sign-up screen and payment modal) ===== -->
+  <template id="payment-box-template">
+    <div class="payment-box">
+      <div class="payment-amount">Total to pay: <strong>₹250</strong></div>
+      <img class="payment-qr" src="qr.png" alt="UPI payment QR code">
+      <p class="payment-qr-missing hidden">The QR code isn't available right now. Please call <a href="tel:+918320260205">+91 83202 60205</a> to pay.</p>
+      <ol class="payment-steps">
+        <li>Open any UPI app (GPay, PhonePe, Paytm, BHIM) and scan the QR code.</li>
+        <li>Pay exactly <strong>₹250</strong>.</li>
+        <li>Copy the <strong>UPI transaction ID (UTR)</strong> shown after payment and enter it below.</li>
+      </ol>
+      <label>UPI Transaction ID (UTR)</label>
+      <input type="text" class="payment-utr" placeholder="e.g. 412345678901" autocomplete="off" autocapitalize="off" spellcheck="false">
+    </div>
+  </template>
+
+  <!-- ===== Payment modal (shown when usage limit is reached) ===== -->
+  <div id="payment-modal" class="modal-overlay hidden">
+    <div class="modal-card">
+      <button type="button" id="payment-close-btn" class="modal-close" title="Close">×</button>
+      <h2 class="modal-title">Usage limit reached</h2>
+      <p class="subtitle" id="payment-modal-subtitle">Pay ₹250 to get a fresh allowance and keep studying.</p>
+      <div id="modal-payment"></div>
+      <button id="payment-submit-btn" class="primary-btn">I've Paid — Submit Transaction ID</button>
+      <p id="payment-error" class="error"></p>
+      <p id="payment-success" class="success"></p>
+      <p class="contact-line">📞 Need help? Call / WhatsApp <a href="tel:+918320260205">+91 83202 60205</a></p>
     </div>
   </div>
 

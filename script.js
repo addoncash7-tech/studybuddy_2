@@ -31,6 +31,7 @@ const newUsername = document.getElementById("new-username");
 const newPassword = document.getElementById("new-password");
 const userList = document.getElementById("user-list");
 const pendingList = document.getElementById("pending-list");
+const paymentList = document.getElementById("payment-list");
 const adminError = document.getElementById("admin-error");
 const adminSuccess = document.getElementById("admin-success");
 
@@ -64,15 +65,108 @@ function renderUsage(usage) {
   }
 
   const percentUsed = Math.min(100, Math.max(0, usage.percent_used));
-  const label = `${Math.round(usage.percent_remaining)}% of your usage remaining`;
+  let label = `${Math.round(usage.percent_remaining)}% of your usage remaining`;
+  if (usage.limit_reached) {
+    label = usage.payment_pending
+      ? "Usage limit reached — your payment is awaiting admin verification"
+      : "Usage limit reached";
+  }
 
   bars.forEach(({ bar, fill, text }) => {
     bar.classList.remove("hidden");
+    const payLink = bar.querySelector(".pay-link");
+    if (payLink) payLink.classList.toggle("hidden", !(usage.limit_reached && !usage.payment_pending));
     fill.style.width = `${percentUsed}%`;
     fill.classList.toggle("usage-warn", percentUsed >= 75 && percentUsed < 95);
     fill.classList.toggle("usage-critical", percentUsed >= 95);
     text.textContent = label;
   });
+}
+
+// ---------- Payment (UPI QR) ----------
+const paymentModal = document.getElementById("payment-modal");
+const paymentCloseBtn = document.getElementById("payment-close-btn");
+const paymentSubmitBtn = document.getElementById("payment-submit-btn");
+const paymentError = document.getElementById("payment-error");
+const paymentSuccess = document.getElementById("payment-success");
+const paymentModalSubtitle = document.getElementById("payment-modal-subtitle");
+const modalPaymentHost = document.getElementById("modal-payment");
+const signupPaymentHost = document.getElementById("signup-payment");
+
+// Clone the shared QR + instructions + UTR box into a container.
+function mountPaymentBox(host) {
+  const tpl = document.getElementById("payment-box-template");
+  host.innerHTML = "";
+  host.appendChild(tpl.content.cloneNode(true));
+  const img = host.querySelector(".payment-qr");
+  const missing = host.querySelector(".payment-qr-missing");
+  img.addEventListener("error", () => {
+    img.classList.add("hidden");
+    missing.classList.remove("hidden");
+  });
+  return host.querySelector(".payment-utr");
+}
+
+const signupUtrInput = mountPaymentBox(signupPaymentHost);
+const modalUtrInput = mountPaymentBox(modalPaymentHost);
+
+function openPaymentModal(paymentPending = false) {
+  paymentError.textContent = "";
+  paymentSuccess.textContent = "";
+  modalUtrInput.value = "";
+  if (paymentPending) {
+    // Already paid once and waiting for the admin - don't ask for money again.
+    modalPaymentHost.classList.add("hidden");
+    paymentSubmitBtn.classList.add("hidden");
+    paymentModalSubtitle.textContent =
+      "Your payment is waiting for admin verification. Access returns as soon as it's verified.";
+  } else {
+    modalPaymentHost.classList.remove("hidden");
+    paymentSubmitBtn.classList.remove("hidden");
+    paymentModalSubtitle.textContent = "Pay ₹250 to get a fresh allowance and keep studying.";
+  }
+  paymentModal.classList.remove("hidden");
+}
+
+function closePaymentModal() {
+  paymentModal.classList.add("hidden");
+  if (!chatScreen.classList.contains("hidden")) enableChatInput(true);
+}
+
+async function submitPayment() {
+  const utr = modalUtrInput.value.trim();
+  paymentError.textContent = "";
+  paymentSuccess.textContent = "";
+  if (!utr) {
+    paymentError.textContent = "Please enter the UPI transaction ID after paying.";
+    return;
+  }
+
+  paymentSubmitBtn.disabled = true;
+  paymentSubmitBtn.textContent = "Submitting...";
+  try {
+    const data = await apiFetch("/payment/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payment_utr: utr }),
+    });
+    paymentSuccess.textContent = data.message;
+    modalUtrInput.value = "";
+    paymentSubmitBtn.classList.add("hidden");
+    if (currentUser) currentUser.usage = data.usage || currentUser.usage;
+    renderUsage(data.usage);
+  } catch (err) {
+    if (err.message.includes("Login required")) {
+      closePaymentModal();
+      await logout();
+      loginError.textContent = "Session expired. Please sign in again.";
+      return;
+    }
+    paymentError.textContent = err.message;
+  } finally {
+    paymentSubmitBtn.disabled = false;
+    paymentSubmitBtn.textContent = "I've Paid — Submit Transaction ID";
+  }
 }
 
 function getSelectedMode() {
@@ -528,6 +622,11 @@ async function signup() {
     signupError.textContent = "Passwords do not match.";
     return;
   }
+  const payment_utr = signupUtrInput.value.trim();
+  if (!payment_utr) {
+    signupError.textContent = "Please pay ₹250 using the QR code and enter the UPI transaction ID.";
+    return;
+  }
 
   signupBtn.disabled = true;
   signupBtn.textContent = "Requesting...";
@@ -536,7 +635,7 @@ async function signup() {
     const data = await fetch(`${SERVER_URL}/signup`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ username, password, payment_utr }),
     }).then(async (res) => {
       const body = await res.json();
       if (!res.ok) throw new Error(body.error || "Sign-up failed.");
@@ -547,6 +646,7 @@ async function signup() {
     signupUsername.value = "";
     signupPassword.value = "";
     signupPasswordConfirm.value = "";
+    signupUtrInput.value = "";
   } catch (err) {
     if (err.message === "Failed to fetch") {
       signupError.textContent = "Cannot reach the server. Run 'python server.py' in the project folder.";
@@ -555,7 +655,7 @@ async function signup() {
     }
   } finally {
     signupBtn.disabled = false;
-    signupBtn.textContent = "Request Access";
+    signupBtn.textContent = "Pay ₹250 & Request Access";
   }
 }
 
@@ -583,11 +683,58 @@ async function loadUsers() {
   adminSuccess.textContent = "";
   userList.innerHTML = "";
   pendingList.innerHTML = "";
+  paymentList.innerHTML = "";
 
   try {
     const data = await apiFetch("/admin/users");
     const pending = data.users.filter((u) => u.status === "pending");
     const approved = data.users.filter((u) => u.status !== "pending");
+
+    // Renewal payments waiting for the admin to check them in their UPI/bank app.
+    const renewals = [];
+    approved.forEach((u) => {
+      (u.payments || []).filter((p) => p.status === "submitted").forEach((p) => renewals.push({ user: u, payment: p }));
+    });
+
+    if (!renewals.length) {
+      const li = document.createElement("li");
+      li.className = "empty-item";
+      li.textContent = "No payments waiting for verification.";
+      paymentList.appendChild(li);
+    } else {
+      renewals.forEach(({ user, payment }) => {
+        const li = document.createElement("li");
+        li.className = "user-item";
+
+        const info = document.createElement("div");
+        info.className = "user-item-info";
+        const name = document.createElement("span");
+        name.className = "user-item-name";
+        name.textContent = user.username;
+        const meta = document.createElement("span");
+        meta.className = "user-item-meta";
+        meta.textContent = `₹${payment.amount} · UTR ${payment.utr} · ${formatChatDate(payment.submitted_at)}`;
+        info.appendChild(name);
+        info.appendChild(meta);
+
+        const actions = document.createElement("div");
+        actions.className = "user-item-actions";
+        const verifyBtn = document.createElement("button");
+        verifyBtn.className = "open-chat-btn";
+        verifyBtn.textContent = "Verify & Reset";
+        verifyBtn.addEventListener("click", () => reviewPayment(user.username, payment.utr, true));
+        const rejectBtn = document.createElement("button");
+        rejectBtn.className = "remove-btn";
+        rejectBtn.textContent = "Reject";
+        rejectBtn.addEventListener("click", () => reviewPayment(user.username, payment.utr, false));
+        actions.appendChild(verifyBtn);
+        actions.appendChild(rejectBtn);
+
+        li.appendChild(info);
+        li.appendChild(actions);
+        paymentList.appendChild(li);
+      });
+    }
 
     if (!pending.length) {
       const li = document.createElement("li");
@@ -599,15 +746,26 @@ async function loadUsers() {
         const li = document.createElement("li");
         li.className = "user-item";
 
+        const info = document.createElement("div");
+        info.className = "user-item-info";
         const name = document.createElement("span");
+        name.className = "user-item-name";
         name.textContent = user.username;
+        const meta = document.createElement("span");
+        meta.className = "user-item-meta";
+        const signupPayment = (user.payments || [])[0];
+        meta.textContent = signupPayment
+          ? `₹${signupPayment.amount} · UTR ${signupPayment.utr} · ${formatChatDate(signupPayment.submitted_at)}`
+          : "No payment details";
+        info.appendChild(name);
+        info.appendChild(meta);
 
         const actions = document.createElement("div");
         actions.className = "user-item-actions";
 
         const approveBtn = document.createElement("button");
         approveBtn.className = "open-chat-btn";
-        approveBtn.textContent = "Approve";
+        approveBtn.textContent = "Verify & Approve";
         approveBtn.addEventListener("click", () => approveUser(user.username));
 
         const rejectBtn = document.createElement("button");
@@ -617,7 +775,7 @@ async function loadUsers() {
 
         actions.appendChild(approveBtn);
         actions.appendChild(rejectBtn);
-        li.appendChild(name);
+        li.appendChild(info);
         li.appendChild(actions);
         pendingList.appendChild(li);
       });
@@ -668,6 +826,25 @@ async function loadUsers() {
       li.appendChild(actions);
       userList.appendChild(li);
     });
+  } catch (err) {
+    adminError.textContent = err.message;
+  }
+}
+
+async function reviewPayment(username, utr, approve) {
+  adminError.textContent = "";
+  adminSuccess.textContent = "";
+
+  try {
+    await apiFetch(approve ? "/admin/payments/verify" : "/admin/payments/reject", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, utr }),
+    });
+    adminSuccess.textContent = approve
+      ? `Payment verified. "${username}" now has a fresh allowance.`
+      : `Payment from "${username}" rejected.`;
+    await loadUsers();
   } catch (err) {
     adminError.textContent = err.message;
   }
@@ -1031,6 +1208,7 @@ async function sendQuestion() {
       if (currentUser && usage) currentUser.usage = usage;
       renderUsage(usage);
       tokenLimitHit = true;
+      openPaymentModal(Boolean(err.data && err.data.payment_pending));
       return;
     }
     addMessage(`⚠ ${err.message}`, "system");
@@ -1055,6 +1233,17 @@ function resetChat(clearForm = true) {
   setupError.textContent = "";
   currentChatId = null;
 }
+
+paymentSubmitBtn.addEventListener("click", submitPayment);
+paymentCloseBtn.addEventListener("click", closePaymentModal);
+paymentModal.addEventListener("click", (e) => {
+  if (e.target === paymentModal) closePaymentModal();
+});
+modalUtrInput.addEventListener("keydown", (e) => { if (e.key === "Enter") submitPayment(); });
+signupUtrInput.addEventListener("keydown", (e) => { if (e.key === "Enter") signup(); });
+document.querySelectorAll("[data-pay-open]").forEach((btn) => {
+  btn.addEventListener("click", () => openPaymentModal(false));
+});
 
 loginBtn.addEventListener("click", login);
 signupBtn.addEventListener("click", signup);
